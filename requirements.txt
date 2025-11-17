@@ -1,0 +1,9 @@
+﻿Flask>=3.0.0
+Flask-Cors>=4.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+pandas>=2.1.0
+numpy>=1.26.0
+scikit-learn>=1.3.0
+adafruit-io>=2.7.0
+paho-mqtt>=1.6.1

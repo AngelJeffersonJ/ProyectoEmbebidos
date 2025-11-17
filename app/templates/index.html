@@ -1,0 +1,119 @@
+﻿<!doctype html>
+<html lang="es">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wardrive System</title>
+
+  <!-- ✅ Carga limpia de Leaflet SIN integrity -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <style>
+    /* ======= Estilo general ======= */
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        sans-serif;
+      margin: 0;
+      background: #0f172a;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1rem 2rem;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.5rem;
+    }
+
+    /* ======= Layout principal ======= */
+    main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      padding: 1rem;
+      gap: 1rem;
+    }
+
+    #map {
+      flex: 2;
+      height: 100%;
+      min-height: 480px;
+      border-radius: 0.75rem;
+      overflow: hidden;
+      background: #000;
+      /* color de fondo visible mientras carga */
+    }
+
+    #side-panel {
+      flex: 1;
+      min-width: 280px;
+      background: #1e293b;
+      padding: 1rem;
+      border-radius: 0.75rem;
+      overflow-y: auto;
+      max-height: 80vh;
+    }
+
+    /* ======= Leyenda ======= */
+    .legend {
+      background: #1e293b;
+      padding: 0.75rem;
+      border-radius: 0.5rem;
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+
+    .legend h4 {
+      margin: 0 0 0.5rem 0;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 0.5rem;
+    }
+
+    .dot.insecure {
+      background: #dc2626;
+    }
+
+    .dot.secure {
+      background: #22c55e;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Wardrive System</h1>
+    <p>Mapa en tiempo real de redes detectadas por Raspberry Pi Pico W.</p>
+  </header>
+
+  <main>
+    <div id="map"></div>
+
+    <section id="side-panel">
+      <h2>Clustering inseguro</h2>
+      <p>Los clústeres DBSCAN resaltan zonas con redes Open/WEP.</p>
+      <div id="cluster-list"></div>
+    </section>
+  </main>
+
+  <!-- ✅ Carga correcta de Leaflet -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Tu script principal -->
+  <script src="{{ url_for('static', filename='js/map.js') }}"></script>
+</body>
+
+</html>

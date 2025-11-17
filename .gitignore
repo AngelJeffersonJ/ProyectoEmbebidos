@@ -1,0 +1,11 @@
+﻿__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+.idea/
+.vscode/
+.DS_Store
+storage/data.jsonl
+storage/offline_buffer.jsonl
+offline_buffer.jsonl
