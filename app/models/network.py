@@ -26,6 +26,8 @@ class NetworkObservation:
         if not MAC_RE.match(mac):
             raise ValueError(f'Invalid MAC address: {mac}')
         security = str(payload.get('security', 'unknown')).upper()
+        timestamp_value = payload.get('timestamp')
+        timestamp = cls._coerce_timestamp(timestamp_value)
         return cls(
             ssid=str(payload.get('ssid', 'unknown')),
             mac=mac.upper(),
@@ -34,9 +36,23 @@ class NetworkObservation:
             security=security,
             latitude=float(payload.get('latitude')),
             longitude=float(payload.get('longitude')),
+            timestamp=timestamp,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data['timestamp'] = self.timestamp.isoformat()
         return data
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> datetime:
+        if value is None:
+            return datetime.utcnow()
+        try:
+            if isinstance(value, (int, float)):
+                return datetime.utcfromtimestamp(float(value))
+            if isinstance(value, str):
+                return datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            pass
+        return datetime.utcnow()

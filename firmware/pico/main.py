@@ -1,5 +1,3 @@
-﻿from __future__ import annotations
-
 import time
 import ujson
 import network
@@ -7,16 +5,28 @@ import ubinascii
 from machine import UART, Pin
 from umqtt.simple import MQTTClient
 
-try:
-    import secrets  # type: ignore
-except ImportError:  # pragma: no cover - running on device
-    secrets = type('secrets', (), {
-        'WIFI_SSID': 'YOUR_WIFI_SSID',
-        'WIFI_PASSWORD': 'YOUR_WIFI_PASSWORD',
-        'AIO_USERNAME': 'your_aio_username',
-        'AIO_KEY': 'your_aio_key',
-        'AIO_FEED_KEY': 'wardrive',
-    })()
+
+def load_env(path='.env'):
+    env = {}
+    try:
+        with open(path) as handle:  # type: ignore[call-arg]
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                env[key.strip()] = value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return env
+
+
+ENV = load_env()
+
+
+def env(key, default=''):
+    return ENV.get(key, default)
+
 
 GPS_UART = UART(1, baudrate=9600, tx=Pin(4), rx=Pin(5))
 WLAN = network.WLAN(network.STA_IF)
@@ -30,14 +40,20 @@ SECURITY_MAP = {
     4: 'WPA/WPA2-PSK',
     5: 'WPA3',
 }
+WIFI_SSID = env('WIFI_SSID', 'YOUR_WIFI_SSID')
+WIFI_PASSWORD = env('WIFI_PASSWORD', 'YOUR_WIFI_PASSWORD')
+AIO_USERNAME = env('AIO_USERNAME', 'your_aio_username')
+AIO_KEY = env('AIO_KEY', 'your_aio_key')
+AIO_FEED_KEY = env('AIO_FEED_KEY', 'wardrive')
+DEVICE_ID = env('DEVICE_ID', 'pico-main')
 
 
 def connect_wifi() -> None:
     if WLAN.isconnected():
         return
-    print('[WiFi] Connecting to', secrets.WIFI_SSID)
+    print('[WiFi] Connecting to', WIFI_SSID)
     WLAN.active(True)
-    WLAN.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
+    WLAN.connect(WIFI_SSID, WIFI_PASSWORD)
     for _ in range(30):
         if WLAN.isconnected():
             print('[WiFi] Connected, IP:', WLAN.ifconfig()[0])
@@ -82,6 +98,8 @@ def parse_gga(sentence):
         return None
     lat = to_decimal(parts[2], parts[3])
     lon = to_decimal(parts[4], parts[5])
+    if lat is None or lon is None:
+        return None
     satellites = int(parts[7] or 0)
     hdop = float(parts[8] or 99.9)
     fix_quality = parts[6]
@@ -90,10 +108,13 @@ def parse_gga(sentence):
 
 def to_decimal(raw, hemi):
     if not raw:
-        return 0.0
+        return None
     split = 2 if hemi in ('N', 'S') else 3
-    degrees = float(raw[:split])
-    minutes = float(raw[split:])
+    try:
+        degrees = float(raw[:split])
+        minutes = float(raw[split:])
+    except (ValueError, TypeError):
+        return None
     value = degrees + minutes / 60
     if hemi in ('S', 'W'):
         value *= -1
@@ -114,7 +135,7 @@ def get_fix(timeout=5000):
 
 def mqtt_client():
     client_id = ubinascii.hexlify(WLAN.config('mac')).decode()
-    return MQTTClient(client_id, 'io.adafruit.com', user=secrets.AIO_USERNAME, password=secrets.AIO_KEY, keepalive=60)
+    return MQTTClient(client_id, 'io.adafruit.com', user=AIO_USERNAME, password=AIO_KEY, keepalive=60)
 
 
 def save_offline(payload):
@@ -132,21 +153,28 @@ def flush_offline(client):
     if not lines:
         return 0
     sent = 0
+    remaining = []
     for line in lines:
+        if not line.strip():
+            continue
         try:
             payload = ujson.loads(line)
+        except Exception:
+            continue
+        try:
             publish_payload(client, payload)
             sent += 1
         except Exception as exc:
             print('[Buffer] Failed to publish cached payload:', exc)
-            break
-    if sent:
-        open(OFFLINE_BUFFER, 'w').close()
+            remaining.append(payload)
+    with open(OFFLINE_BUFFER, 'w') as handle:
+        for item in remaining:
+            handle.write(ujson.dumps(item) + '\n')
     return sent
 
 
 def publish_payload(client, payload):
-    topic = f"{secrets.AIO_USERNAME}/feeds/{secrets.AIO_FEED_KEY}"
+    topic = f"{AIO_USERNAME}/feeds/{AIO_FEED_KEY}"
     client.publish(topic, ujson.dumps(payload))
     print('[MQTT] Published payload for', payload.get('ssid'))
 
@@ -175,6 +203,7 @@ def main():
                 'latitude': fix['lat'],
                 'longitude': fix['lon'],
                 'timestamp': timestamp,
+                'device_id': DEVICE_ID,
             }
             payloads.append(payload)
         if WLAN.isconnected():

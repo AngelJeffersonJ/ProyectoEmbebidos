@@ -40,12 +40,14 @@ Sistema Wardriving completo para Raspberry Pi Pico W + GPS NEO-6M y backend Flas
    ```bash
    copy .env.example .env
    ```
-   Edita `.env` con tus credenciales de Adafruit IO y rutas deseadas.
+   Edita `.env` con tus credenciales de Adafruit IO y rutas deseadas. Este mismo archivo puedes copiarlo (o una versión reducida) a cada Pico W para evitar `secrets.py`. Si el repositorio vive en GitHub usa [Secrets/Variables de entorno](https://docs.github.com/es/actions/security-guides/encrypted-secrets) para injectar `AIO_*`, `SECRET_KEY`, etc., en tus despliegues y nunca subas el `.env` real.
 3. **Ejecutar servidor**
    ```bash
    python wardrive.py
    ```
    El mapa estará disponible en `http://127.0.0.1:5000/`.
+
+   > El backend usa `WardriveService`: cada muestra recibida se guarda en `storage/data.jsonl`, se intenta publicar al feed de Adafruit IO (HTTP) y, si falla, pasa a `storage/offline_buffer.jsonl` para reintentos. `GET /api/networks` primero consulta Adafruit IO y, si no hay conectividad, cae al almacenamiento local, cumpliendo el requisito de que la visualización consuma los datos remotos.
 
 ### Endpoints principales
 - `GET /` → interfaz Leaflet + leyenda.
@@ -72,24 +74,24 @@ Esto mostrará los clústeres de redes Open/WEP usando DBSCAN (métrica haversin
 ## 📡 Firmware Pico W
 1. **Preparar MicroPython**
    - Flashea MicroPython UF2 oficial en la Pico W.
-   - Copia `firmware/pico/main.py` al dispositivo (`/` o `/main.py`).
-2. **Configurar secretos**
-   - Crea un archivo `secrets.py` en el mismo directorio con:
-     ```python
-     WIFI_SSID = 'TuSSID'
-     WIFI_PASSWORD = 'TuPassword'
-     AIO_USERNAME = 'tu_usuario'
-     AIO_KEY = 'tu_aio_key'
-     AIO_FEED_KEY = 'wardrive'
+   - Copia `firmware/pico/main.py` o `firmware/pico/http_client.py` al dispositivo (renómbralo como `main.py`).
+2. **Configurar `.env` por equipo**
+   - Copia tu `.env` (o crea uno nuevo) en la Pico W junto al `main.py` con algo como:
+     ```
+     WIFI_SSID=TuSSID
+     WIFI_PASSWORD=TuPassword
+     AIO_USERNAME=tu_usuario
+     AIO_KEY=tu_aio_key
+     AIO_FEED_KEY=wardrive
+     BACKEND_URL=http://192.168.1.50:5000
      ```
 3. **Cableado GPS NEO-6M**
    - TX → GP4, RX → GP5, GND común y alimentación 3V3/5V según módulo.
 4. **Funcionamiento**
-   - Escanea redes cada 2 minutos.
-   - Solo envía cuando existe fix GPS (satélites + HDOP aceptable).
-   - Publica payloads JSON vía MQTT (`username/feeds/feed_key`).
-   - Sin internet → escribe en `offline_buffer.jsonl` y reintenta luego.
-   - Logs impresos por REPL (latitud, longitud, satélites, estado Wi-Fi).
+   - Ambos firmwares esperan un fix GPS válido antes de medir. Sin fix → el ciclo se aplaza.
+   - `main.py` publica exclusivamente por MQTT hacia Adafruit IO y mantiene `offline_buffer.jsonl` hasta confirmar que todos los registros pendientes se publicaron.
+   - `http_client.py` publica simultáneamente por MQTT (Adafruit IO) y HTTP (`/api/samples`) para contar con telemetría local extra; si MQTT falla, almacena los payloads y los reintenta automáticamente cuando vuelve la conectividad.
+   - Cada payload incluye SSID/MAC/canal/RSSI/seguridad + latitud/longitud para visualizar la cobertura capturada localmente.
 
 ## 🧪 Mock Client
 `tools/mock_client.py` genera datos ficticios para pruebas rápidas.

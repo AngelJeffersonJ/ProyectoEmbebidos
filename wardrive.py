@@ -21,12 +21,10 @@ Config (opcional):
 """
 
 from __future__ import annotations
-import json
 import time
 import logging
 from pathlib import Path
 from typing import List, Dict, Any
-from datetime import datetime
 
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
@@ -39,6 +37,10 @@ except Exception:
     pass
 
 import os
+from app.models.network import NetworkObservation
+from app.services.adafruit_client import AdafruitClient
+from app.services.storage_queue import StorageQueue
+from app.services.wardrive_service import WardriveService
 
 # Optional ML imports (scikit-learn)
 try:
@@ -52,11 +54,15 @@ except Exception:
 # Config
 STORAGE_DIR = Path("storage")
 STORAGE_DIR.mkdir(exist_ok=True)
-BUFFER_FILE = STORAGE_DIR / "offline_buffer.jsonl"
 
 DEBUG = os.getenv("DEBUG", "0") in ("1", "true", "True")
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", os.getenv("PORT", 5000)))
+AIO_USERNAME = os.getenv("AIO_USERNAME", "")
+AIO_KEY = os.getenv("AIO_KEY", "")
+AIO_FEED_KEY = os.getenv("AIO_FEED_KEY", "wardrive")
+STORAGE_PATH = Path(os.getenv("STORAGE_PATH", STORAGE_DIR / "data.jsonl"))
+OFFLINE_BUFFER_PATH = Path(os.getenv("OFFLINE_BUFFER_PATH", STORAGE_DIR / "offline_buffer.jsonl"))
 
 # Security labeling we treat as insecure for clustering
 INSECURE_TYPES = {"OPEN", "WEP"}
@@ -67,39 +73,67 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("wardrive")
+storage_queue = StorageQueue(str(STORAGE_PATH))
+offline_buffer = StorageQueue(str(OFFLINE_BUFFER_PATH))
+adafruit_client = AdafruitClient(AIO_USERNAME, AIO_KEY, AIO_FEED_KEY)
+wardrive_service = WardriveService(adafruit_client, storage_queue, offline_buffer)
+
+if adafruit_client.is_configured:
+    log.info("Adafruit IO client enabled for feed '%s'", AIO_FEED_KEY)
+else:
+    log.warning("Adafruit IO credentials missing -> running in offline/demo mode")
 
 
-# -------------------------
-# Storage helpers (JSONL)
-# -------------------------
-def append_sample(sample: Dict[str, Any]) -> None:
-    """Append a JSON-line to buffer file (create if missing)."""
+def normalize_sample(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten payloads from Pico devices into NetworkObservation dictionaries."""
+    if not isinstance(data, dict):
+        raise ValueError("payload must be a JSON object")
+
+    flattened: Dict[str, Any] = {}
+    network = data.get("network")
+    if isinstance(network, dict):
+        flattened.update(network)
+    else:
+        for field in ("ssid", "mac", "channel", "rssi", "security", "timestamp"):
+            if field in data:
+                flattened[field] = data[field]
+
+    gps = data.get("gps")
+    lat_source = None
+    lon_source = None
+    if isinstance(gps, dict):
+        lat_source = gps.get("latitude")
+        lon_source = gps.get("longitude")
+    lat_source = lat_source if lat_source is not None else data.get("latitude")
+    lon_source = lon_source if lon_source is not None else data.get("longitude")
     try:
-        sample.setdefault("timestamp", time.time())
-        with open(BUFFER_FILE, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(sample, ensure_ascii=False) + "\n")
-    except Exception:
-        log.exception("Error appending sample to buffer")
+        flattened["latitude"] = float(lat_source)
+        flattened["longitude"] = float(lon_source)
+    except (TypeError, ValueError):
+        raise ValueError("missing GPS coordinates (latitude/longitude)")
 
+    if "channel" in flattened:
+        try:
+            flattened["channel"] = int(flattened["channel"])
+        except (TypeError, ValueError):
+            flattened["channel"] = 1
+    if "rssi" in flattened:
+        try:
+            flattened["rssi"] = int(flattened["rssi"])
+        except (TypeError, ValueError):
+            flattened["rssi"] = -100
+    if "security" in flattened and isinstance(flattened["security"], str):
+        flattened["security"] = flattened["security"].upper()
 
-def load_all_samples() -> List[Dict[str, Any]]:
-    """Read all JSONL entries and return as list."""
-    if not BUFFER_FILE.exists():
-        return []
-    items: List[Dict[str, Any]] = []
-    try:
-        with open(BUFFER_FILE, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    items.append(json.loads(line))
-                except Exception:
-                    log.exception("Ignoring malformed line in buffer")
-    except Exception:
-        log.exception("Error reading buffer file")
-    return items
+    observation = NetworkObservation.from_payload(flattened)
+    normalized = observation.to_dict()
+    normalized["received_at"] = data.get("timestamp") or time.time()
+
+    if isinstance(gps, dict):
+        for key in ("satellites", "hdop"):
+            if key in gps:
+                normalized[key] = gps[key]
+    return normalized
 
 
 # -------------------------
@@ -152,6 +186,19 @@ def compute_clusters(networks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         avg_lat = sum(m["latitude"] for m in members) / len(members)
         avg_lon = sum(m["longitude"] for m in members) / len(members)
         avg_rssi = sum(m.get("rssi", 0) for m in members) / len(members)
+        # Resumen con SSID únicos
+        seen_ssid = set()
+        samples = []
+        for m in members:
+            ssid_val = (m.get("ssid") or "(sin nombre)").strip()
+            sec_val = m.get("security") or "Desconocida"
+            key = (ssid_val, sec_val)
+            if key in seen_ssid:
+                continue
+            seen_ssid.add(key)
+            samples.append({"ssid": ssid_val, "security": sec_val, "rssi": m.get("rssi")})
+            if len(samples) >= 8:
+                break
         out.append(
             {
                 "cluster": int(lbl),
@@ -159,9 +206,37 @@ def compute_clusters(networks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "avg_latitude": avg_lat,
                 "avg_longitude": avg_lon,
                 "avg_rssi": float(round(avg_rssi, 2)),
+                "samples": samples,
             }
         )
     return out
+
+
+def dedupe_networks(networks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep the freshest (or strongest) sample per network key."""
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for net in networks:
+        mac = str(net.get("mac", "")).strip().upper()
+        ssid = str(net.get("ssid", "")).strip()
+        chan = net.get("channel")
+        key = mac or f"{ssid}::{chan}"
+        if not key:
+            continue
+        prev = by_key.get(key)
+        if not prev:
+            by_key[key] = net
+            continue
+        # Prefer newer timestamp, else higher RSSI
+        prev_ts = prev.get("timestamp", 0)
+        curr_ts = net.get("timestamp", 0)
+        if curr_ts > prev_ts:
+            by_key[key] = net
+            continue
+        prev_rssi = prev.get("rssi", -9999)
+        curr_rssi = net.get("rssi", -9999)
+        if curr_ts == prev_ts and curr_rssi > prev_rssi:
+            by_key[key] = net
+    return list(by_key.values())
 
 
 # -------------------------
@@ -208,31 +283,39 @@ def create_app():
         except Exception:
             pass
 
-        # Compose stored payload (include received timestamp)
-        payload = {"network": network, "gps": gps, "received_at": time.time()}
-        append_sample(payload)
-        log.info("Received sample: SSID=%s MAC=%s", network.get("ssid"), network.get("mac"))
-        return jsonify({"status": "ok"}), 201
+        try:
+            normalized = normalize_sample(data)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        storage_queue.append(normalized)
+        published = False
+        if adafruit_client.is_configured:
+            try:
+                adafruit_client.publish(normalized)
+                published = True
+            except Exception:
+                log.exception("Failed to publish sample to Adafruit IO")
+        if not published:
+            offline_buffer.append(normalized)
+        else:
+            # Try to flush any pending backlog so multi-equipo pruebas stay in sync
+            wardrive_service.sync_offline_buffer()
+
+        log.info(
+            "Received sample: SSID=%s MAC=%s (adafruit=%s)",
+            normalized.get("ssid"),
+            normalized.get("mac"),
+            "ok" if published else "pending",
+        )
+        return jsonify({"status": "ok", "adafruit_published": published}), 201
 
     @app.route("/api/networks", methods=["GET"])
     def api_networks():
-        # Load all samples and flatten to 'networks' list
-        samples = load_all_samples()
-        networks = []
-        for s in samples:
-            net = s.get("network", {}).copy()
-            gps = s.get("gps", {})
-            # Merge gps fields (latitude/longitude) into network for UI convenience
-            if isinstance(gps, dict):
-                if "latitude" in gps and "longitude" in gps:
-                    net["latitude"] = gps["latitude"]
-                    net["longitude"] = gps["longitude"]
-            # Add timestamp if available
-            net["timestamp"] = s.get("received_at", s.get("timestamp"))
-            networks.append(net)
-
-        clusters = compute_clusters(networks)
-        return jsonify({"count": len(networks), "networks": networks, "clusters": clusters})
+        records, source = wardrive_service.fetch_networks()
+        deduped = dedupe_networks(records)
+        clusters = compute_clusters(deduped)
+        return jsonify({"count": len(deduped), "source": source, "networks": deduped, "clusters": clusters})
 
     return app
 

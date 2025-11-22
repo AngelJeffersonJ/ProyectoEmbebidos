@@ -51,7 +51,11 @@ class WardriveService:
             except (ValueError, TypeError) as exc:
                 LOGGER.debug('Skipping invalid payload: %s', exc)
                 continue
-            normalized.append(observation.to_dict())
+            record = observation.to_dict()
+            for key in ('satellites', 'hdop'):
+                if key in payload:
+                    record[key] = payload[key]
+            normalized.append(record)
         return normalized
 
     def sync_offline_buffer(self) -> int:

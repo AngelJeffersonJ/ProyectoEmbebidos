@@ -25,6 +25,10 @@
     header {
       padding: 1rem 2rem;
       border-bottom: 1px solid #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
     }
 
     h1 {
@@ -83,20 +87,14 @@
       margin-right: 0.5rem;
     }
 
-    .dot.insecure {
-      background: #dc2626;
-    }
-
-    .dot.secure {
-      background: #22c55e;
-    }
+    .dot.insecure { background: #dc2626; }
+    .dot.secure { background: #22c55e; }
   </style>
 </head>
 
 <body>
   <header>
     <h1>Wardrive System</h1>
-    <p>Mapa en tiempo real de redes detectadas por Raspberry Pi Pico W.</p>
   </header>
 
   <main>
@@ -104,7 +102,7 @@
 
     <section id="side-panel">
       <h2>Clustering inseguro</h2>
-      <p>Los clústeres DBSCAN resaltan zonas con redes Open/WEP.</p>
+      <p>Colores solo distinguen zonas/redes (sin semáforo). Cada tono corresponde a un clúster o red distinta.</p>
       <div id="cluster-list"></div>
     </section>
   </main>
