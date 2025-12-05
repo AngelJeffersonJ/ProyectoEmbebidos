@@ -13,7 +13,7 @@ Persistencia ligera:
  - Guarda cada muestra como JSONL en storage/offline_buffer.jsonl
 
 Clustering:
- - Si sklearn está instalado, calcula DBSCAN (haversine) sobre redes INSEGURAS (OPEN/WEP).
+ - Si sklearn está instalado, calcula DBSCAN (haversine) o KMeans (CLUSTER_ALGO=kmeans) sobre redes INSEGURAS (OPEN/WEP) y SEGURAS.
  - Si sklearn NO está instalado, devuelve clusters = [] sin error.
 
 Config (opcional):
@@ -46,7 +46,7 @@ from app.services.wardrive_service import WardriveService
 try:
     from math import radians
     import numpy as np
-    from sklearn.cluster import DBSCAN
+    from sklearn.cluster import DBSCAN, KMeans
     SKLEARN_AVAILABLE = True
 except Exception:
     SKLEARN_AVAILABLE = False
@@ -66,6 +66,7 @@ OFFLINE_BUFFER_PATH = Path(os.getenv("OFFLINE_BUFFER_PATH", STORAGE_DIR / "offli
 
 # Security labeling we treat as insecure for clustering
 INSECURE_TYPES = {"OPEN", "WEP"}
+CLUSTER_ALGO = os.getenv("CLUSTER_ALGO", "dbscan").strip().lower()
 
 # Logging
 logging.basicConfig(
@@ -139,41 +140,54 @@ def normalize_sample(data: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------
 # Clustering helpers
 # -------------------------
-def compute_clusters(networks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def compute_clusters(networks: List[Dict[str, Any]], category: str = "insecure") -> tuple[List[Dict[str, Any]], str]:
     """
-    Compute DBSCAN clusters over insecure networks (latitude/longitude present).
-    Returns list of clusters with simple aggregates (avg lat/lon, avg_rssi, count).
-    If sklearn not available, returns empty list.
+    Compute clusters (DBSCAN or KMeans) over networks with coordinates.
+    Filters by category: "insecure" (OPEN/WEP) or "secure" (rest).
+    Returns (clusters, algorithm_used). If sklearn not available, returns ([], 'none').
     """
     if not SKLEARN_AVAILABLE:
         log.info("scikit-learn not available -> skipping clustering")
-        return []
+        return [], "none"
 
-    # Filter only insecure networks with coords
+    algorithm_used = "dbscan" if CLUSTER_ALGO != "kmeans" else "kmeans"
+
+    # Filter networks with coords by category
     points = []
     meta = []
     for n in networks:
         sec = str(n.get("security", "")).upper()
         lat = n.get("latitude")
         lon = n.get("longitude")
-        if sec in INSECURE_TYPES and isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        is_insecure = sec in INSECURE_TYPES
+        if category == "insecure" and not is_insecure:
+            continue
+        if category == "secure" and is_insecure:
+            continue
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
             points.append((lat, lon))
             meta.append(n)
 
     if not points:
-        return []
+        return [], algorithm_used
 
-    # Convert to radians for haversine metric
-    coords = np.array([[radians(p[0]), radians(p[1])] for p in points])
+    if algorithm_used == "kmeans":
+        coords = np.array(points, dtype=float)
+        kmeans_clusters = max(1, min(int(os.getenv("KMEANS_N_CLUSTERS", "4")), len(points)))
+        model = KMeans(n_clusters=kmeans_clusters, n_init=10, random_state=42)
+        labels = model.fit_predict(coords)
+    else:
+        # Convert to radians for haversine metric
+        coords = np.array([[radians(p[0]), radians(p[1])] for p in points])
 
-    # DBSCAN with haversine requires eps in radians. eps ~ 0.05 rad ~ 5.5 km
-    # For wardrive we probably want ~ 100-200m: 100m / earth_radius(6371000) -> ~0.0000157 rad
-    eps_meters = float(os.getenv("DBSCAN_EPS_METERS", "200"))  # default 200m
-    eps_radians = eps_meters / 6371000.0
-    min_samples = int(os.getenv("DBSCAN_MIN_SAMPLES", "3"))
+        # DBSCAN with haversine requires eps in radians. eps ~ 0.05 rad ~ 5.5 km
+        # For wardrive we probably want ~ 100-200m: 100m / earth_radius(6371000) -> ~0.0000157 rad
+        eps_meters = float(os.getenv("DBSCAN_EPS_METERS", "200"))  # default 200m
+        eps_radians = eps_meters / 6371000.0
+        min_samples = int(os.getenv("DBSCAN_MIN_SAMPLES", "3"))
 
-    db = DBSCAN(eps=eps_radians, metric="haversine", min_samples=min_samples)
-    labels = db.fit_predict(coords)
+        model = DBSCAN(eps=eps_radians, metric="haversine", min_samples=min_samples)
+        labels = model.fit_predict(coords)
 
     clusters = {}
     for lbl, m in zip(labels, meta):
@@ -207,9 +221,10 @@ def compute_clusters(networks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "avg_longitude": avg_lon,
                 "avg_rssi": float(round(avg_rssi, 2)),
                 "samples": samples,
+                "category": category,
             }
         )
-    return out
+    return out, algorithm_used
 
 
 def dedupe_networks(networks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -314,8 +329,17 @@ def create_app():
     def api_networks():
         records, source = wardrive_service.fetch_networks()
         deduped = dedupe_networks(records)
-        clusters = compute_clusters(deduped)
-        return jsonify({"count": len(deduped), "source": source, "networks": deduped, "clusters": clusters})
+        clusters_insecure, algo_insecure = compute_clusters(deduped, category="insecure")
+        clusters_secure, algo_secure = compute_clusters(deduped, category="secure")
+        algo_used = algo_insecure if algo_insecure != "none" else algo_secure
+        clusters = clusters_insecure + clusters_secure
+        return jsonify({
+            "count": len(deduped),
+            "source": source,
+            "networks": deduped,
+            "clusters": clusters,
+            "cluster_algorithm": algo_used,
+        })
 
     return app
 
@@ -326,7 +350,7 @@ def create_app():
 if __name__ == "__main__":
     log.info("Starting Wardrive server on %s:%s", SERVER_HOST, SERVER_PORT)
     if SKLEARN_AVAILABLE:
-        log.info("scikit-learn detected -> DBSCAN clustering enabled")
+        log.info("scikit-learn detected -> clustering enabled (%s)", CLUSTER_ALGO.upper())
     else:
         log.info("scikit-learn NOT detected -> clustering disabled (clusters: [])")
 

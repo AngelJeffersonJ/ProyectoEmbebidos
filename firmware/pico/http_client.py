@@ -38,7 +38,7 @@ def env(key, default=''):
 
 WIFI_SSID = env('WIFI_SSID', 'ssid')
 WIFI_PASSWORD = env('WIFI_PASSWORD', 'password')
-SERVER_BASE = env('BACKEND_URL', 'http://192.168.146.11:5000').strip()
+SERVER_BASE = env('BACKEND_URL', 'http://10.115.205.11:5000').strip()
 POST_ENDPOINT = SERVER_BASE.rstrip('/') + '/api/samples' if SERVER_BASE else ''
 AIO_USERNAME = env('AIO_USERNAME', '')
 AIO_KEY = env('AIO_KEY', '')

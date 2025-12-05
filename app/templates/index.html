@@ -89,6 +89,33 @@
 
     .dot.insecure { background: #dc2626; }
     .dot.secure { background: #22c55e; }
+    .dot.zone-dot { border: 1px solid #0f172a; }
+
+    .cluster-summary {
+      font-weight: 600;
+      margin: 0 0 0.75rem 0;
+    }
+
+    .zone-paragraph {
+      background: #0b172a;
+      border: 1px solid #1f2937;
+      border-radius: 0.6rem;
+      padding: 0.75rem;
+      margin: 0 0 0.75rem 0;
+      line-height: 1.5;
+    }
+
+    .zone-paragraph small {
+      color: #cbd5e1;
+    }
+
+    .verdict {
+      border-left: 4px solid #38bdf8;
+      background: #0b172a;
+      padding: 0.75rem;
+      border-radius: 0.6rem;
+      margin: 0.25rem 0 0 0;
+    }
   </style>
 </head>
 
@@ -101,8 +128,8 @@
     <div id="map"></div>
 
     <section id="side-panel">
-      <h2>Clustering inseguro</h2>
-      <p>Colores solo distinguen zonas/redes (sin semáforo). Cada tono corresponde a un clúster o red distinta.</p>
+      <h2>Clustering de zonas</h2>
+      <p>Se muestran zonas seguras e inseguras con colores aleatorios (nunca rojo o verde); cada una tiene narrativa y veredicto.</p>
       <div id="cluster-list"></div>
     </section>
   </main>
