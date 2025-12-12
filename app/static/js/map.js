@@ -18,6 +18,7 @@ const clusterLayer = L.layerGroup().addTo(map);
 const insecureTypes = new Set(['OPEN', 'WEP']);
 const clusterColorCache = new Map();
 let viewportLocked = false;
+let currentNetworks = [];
 
 // ===========================================================
 // Utilidades geograficas
@@ -69,10 +70,11 @@ async function fetchNetworks() {
     const payload = await response.json();
     const networks = payload.networks || [];
     const clusterAlgorithm = payload.cluster_algorithm || 'dbscan';
+    currentNetworks = networks;
 
     const safetyStatus = computeSafetyStatus(networks);
     renderNetworks(networks);
-    renderClusters(payload.clusters || [], safetyStatus, clusterAlgorithm);
+    renderClusters(payload.clusters || [], safetyStatus, clusterAlgorithm, networks);
   } catch (error) {
     console.error('[ERROR] Fallo la carga de redes:', error);
   }
@@ -287,11 +289,10 @@ function mergeOverlappingClusters(clusters) {
 // ===========================================================
 // Renderizado de cl�steres (DBSCAN o KMeans)
 // ===========================================================
-function renderClusters(clusters, safetyStatus, algorithmUsed = 'dbscan') {
+function renderClusters(clusters, safetyStatus, algorithmUsed = 'dbscan', networks = []) {
   const container = document.querySelector('#cluster-list');
   if (!container) return;
   clusterLayer.clearLayers();
-  const placedCenters = [];
 
   const mergedClusters = mergeOverlappingClusters(Array.isArray(clusters) ? clusters : []);
 
@@ -344,49 +345,47 @@ function renderClusters(clusters, safetyStatus, algorithmUsed = 'dbscan') {
     });
   });
 
-  // Pinta areas circulares en el mapa para zonas (seguras e inseguras)
+  // Pinta areas rellenas basadas en los puntos del cluster
   mergedClusters.forEach((cluster) => {
     if (typeof cluster.avg_latitude !== 'number' || typeof cluster.avg_longitude !== 'number') {
       return;
     }
     const radiusMeters = radiusForCluster(cluster.count);
-    const key = clusterKey(cluster);
-    let hash = 0;
-    for (let i = 0; i < key.length; i += 1) {
-      hash = key.charCodeAt(i) + ((hash << 5) - hash);
-      hash |= 0;
-    }
-    const seedAngle = (Math.abs(hash) % 360) * (Math.PI / 180);
-    const [adjLat, adjLon] = findNonOverlappingPosition(
-      cluster.avg_latitude,
-      cluster.avg_longitude,
-      radiusMeters,
-      placedCenters,
-      seedAngle
-    );
-    placedCenters.push({ lat: adjLat, lon: adjLon, radius: radiusMeters });
     const areaColor = getClusterColor(cluster);
     const typeLabel = cluster.category === 'secure' ? 'seguras' : cluster.category === 'insecure' ? 'inseguras' : 'mixtas';
-    const circle = L.circle([adjLat, adjLon], {
-      radius: radiusMeters,
-      color: areaColor,
-      fillColor: areaColor,
-      fillOpacity: 0.12,
-      weight: 1,
-      interactive: true,
-    });
+
+    const hull = buildClusterHull(cluster, networks, radiusMeters);
+    let shape;
+    if (hull && hull.length >= 3) {
+      shape = L.polygon(hull, {
+        color: areaColor,
+        fillColor: areaColor,
+        fillOpacity: 0.18,
+        weight: 1,
+        interactive: true,
+      });
+    } else {
+      shape = L.circle([cluster.avg_latitude, cluster.avg_longitude], {
+        radius: radiusMeters,
+        color: areaColor,
+        fillColor: areaColor,
+        fillOpacity: 0.12,
+        weight: 1,
+        interactive: true,
+      });
+    }
     const sampleText = Array.isArray(cluster.samples)
       ? cluster.samples.slice(0, 5).map((s) => `${s.ssid} (${s.security || '?'})`).join('<br>')
       : '';
-    circle.bindTooltip(
+    shape.bindTooltip(
       `Cluster ${Array.isArray(cluster.cluster_ids) ? cluster.cluster_ids.join(',') : cluster.cluster} (${typeLabel}) - Redes: ${cluster.count}<br>${sampleText}`,
       { sticky: true }
     );
-    circle.on('click', () => {
+    shape.on('click', () => {
       map.setView([cluster.avg_latitude, cluster.avg_longitude], 16);
     });
-    circle.addTo(clusterLayer);
-    if (circle.bringToBack) circle.bringToBack();
+    shape.addTo(clusterLayer);
+    if (shape.bringToBack) shape.bringToBack();
   });
 }
 
@@ -443,6 +442,87 @@ function jitterCoords(network, idx) {
   const lat = network.latitude + Math.cos(angle) * radius;
   const lon = network.longitude + Math.sin(angle) * radius;
   return [lat, lon];
+}
+
+// ===========================================================
+// Poligono envolvente (convex hull) para rellenar la zona real
+// ===========================================================
+function buildClusterHull(cluster, networks, radiusMeters) {
+  if (!Array.isArray(networks) || networks.length === 0) return null;
+  const centerLat = cluster.avg_latitude;
+  const centerLon = cluster.avg_longitude;
+  const searchRadius = Math.max(radiusMeters * 1.8, 1200); // ampliar cobertura para recorridos largos
+  const category = cluster.category || 'mixed';
+  const nearbyPoints = [];
+  networks.forEach((n, idx) => {
+    if (!Number.isFinite(n.latitude) || !Number.isFinite(n.longitude)) return;
+    const [lat, lon] = jitterCoords(n, idx); // usa las coords que se muestran en el mapa
+    const sec = String(n.security || '').toUpperCase();
+    const isInsecure = insecureTypes.has(sec);
+    if (category === 'insecure' && !isInsecure) return;
+    if (category === 'secure' && isInsecure) return;
+    if (metersDistance(centerLat, centerLon, lat, lon) <= searchRadius) {
+      nearbyPoints.push([lat, lon]);
+    }
+  });
+  if (nearbyPoints.length < 3) {
+    return nearbyPoints;
+  }
+  const hull = convexHull(nearbyPoints);
+  return inflatePolygon(hull, 25); // agrega ~25m de margen para cubrir puntos en el borde
+}
+
+function convexHull(points) {
+  if (points.length < 3) return points;
+  const rad = Math.PI / 180;
+  const refLat = points.reduce((acc, [lat]) => acc + lat, 0) / points.length;
+  const projected = points.map(([lat, lon]) => ({
+    lat,
+    lon,
+    x: lon * Math.cos(refLat * rad),
+    y: lat,
+  }));
+  projected.sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  projected.forEach((p) => {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  });
+  const upper = [];
+  for (let i = projected.length - 1; i >= 0; i -= 1) {
+    const p = projected[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+  return hull.map((p) => [p.lat, p.lon]);
+}
+
+// Expande un poligono unos metros para asegurar que todos los puntos queden dentro
+function inflatePolygon(points, bufferMeters = 10) {
+  if (points.length === 0 || bufferMeters <= 0) return points;
+  const rad = Math.PI / 180;
+  const centerLat = points.reduce((acc, [lat]) => acc + lat, 0) / points.length;
+  const centerLon = points.reduce((acc, [, lon]) => acc + lon, 0) / points.length;
+  const cosLat = Math.cos(centerLat * rad);
+
+  return points.map(([lat, lon]) => {
+    const dx = (lon - centerLon) * 111320 * cosLat;
+    const dy = (lat - centerLat) * 111320;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const scale = (dist + bufferMeters) / dist;
+    const nx = dx * scale;
+    const ny = dy * scale;
+    const newLat = centerLat + (ny / 111320);
+    const newLon = centerLon + (nx / (111320 * cosLat));
+    return [newLat, newLon];
+  });
 }
 
 // ===========================================================

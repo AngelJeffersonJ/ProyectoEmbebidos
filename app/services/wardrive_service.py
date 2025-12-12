@@ -21,9 +21,15 @@ class WardriveService:
         self.offline_buffer = offline_buffer
 
     def fetch_networks(self) -> Tuple[List[Dict[str, Any]], str]:
-        records: List[Dict[str, Any]] = []
+        # Prioridad: storage local -> offline buffer -> Adafruit (solo si no hay nada local)
+        records: List[Dict[str, Any]] = self.storage.read_all()
         source = 'storage'
-        if self.adafruit_client.is_configured:
+
+        if not records:
+            records = self.offline_buffer.read_all()
+            source = 'offline-buffer'
+
+        if not records and self.adafruit_client.is_configured:
             try:
                 remote_entries = self.adafruit_client.fetch_feed_data()
                 records = self._normalize_remote_entries(remote_entries)
@@ -32,12 +38,7 @@ class WardriveService:
                 source = 'adafruit'
             except requests.RequestException as exc:
                 LOGGER.warning('Unable to fetch Adafruit feed: %s', exc)
-        if not records:
-            records = self.storage.read_all()
-            source = 'storage'
-        if not records:
-            records = self.offline_buffer.read_all()
-            source = 'offline-buffer'
+
         return records, source
 
     def _normalize_remote_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
